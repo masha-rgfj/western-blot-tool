@@ -1,25 +1,20 @@
 # src/main.py
-
 import sys
 from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QGraphicsView, QGraphicsScene,
-    QFileDialog, QInputDialog, QWidget, QVBoxLayout,
-    QGraphicsLineItem, QGraphicsSimpleTextItem,
-    QGraphicsTextItem, QGraphicsRectItem
+    QApplication, QMainWindow, QGraphicsView, QGraphicsScene, QFileDialog,
+    QInputDialog, QSplitter, QGraphicsLineItem, QGraphicsSimpleTextItem,
+    QGraphicsRectItem, QGraphicsTextItem, QMessageBox
 )
 from PySide6.QtGui import QAction, QPixmap, QPen, QFont, QColor
-from PySide6.QtCore import Qt, QRect, QSize, QPoint, QPointF, QRectF
+from PySide6.QtCore import Qt, QRect, QSize, QPoint, QRectF
 
-
-
-
-
+# ---------- View supporting mark & crop ----------
 class CanvasView(QGraphicsView):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.rubberBand = None
         self.origin = QPoint()
-        self.mode = None            # None | "crop" | "mark"
+        self.mode = None             # None | "crop" | "mark"
         self.crop_callback = None
         self.mark_callback = None
 
@@ -56,32 +51,54 @@ class CanvasView(QGraphicsView):
             super().mouseReleaseEvent(event)
 
 
+# ---------- Main Window ----------
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Western Blot Figure Tool")
 
+        # --- image (left) ---
+        self.image_left_margin = 80
         self.current_pixmap = None
         self.pixmap_item = None
-        self.kda_markers = []
+        self.kda_markers = []  # [{y, kda, line, text}]
 
-        # margin (px) to the LEFT of the gel for ticks/labels
-        self.left_margin = 60
+        self.image_scene = QGraphicsScene(self)
+        self.image_view = CanvasView(self)
+        self.image_view.setScene(self.image_scene)
+        self.image_view.setAlignment(Qt.AlignCenter)
 
-        # Scene/View
-        self.scene = QGraphicsScene(self)
-        self.view = CanvasView(self)
-        self.view.setScene(self.scene)
-        self.view.setAlignment(Qt.AlignCenter)
-        self.setCentralWidget(self.view)
+        # --- figure canvas (right) ---
+        self.figure_left_margin = 80
+        self.figure_scene = QGraphicsScene(self)
+        self.figure_view = QGraphicsView(self.figure_scene)
+        self.figure_view.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.figure_view.setBackgroundBrush(QColor(247, 247, 247))
 
-        # Menus
+        self.figure_next_y = 20
+        self.figure_min_width = 900
+        self.figure_scene.setSceneRect(0, 0, self.figure_min_width, 1200)
+
+        # bands registry + selection + default size (BY WIDTH)
+        self.figure_bands = []            # list of dicts (see add_band_to_figure)
+        self.selected_band = None
+        self.last_band_width = None       # px; new bands default to this width
+        self.figure_scene.selectionChanged.connect(self.on_selection_changed)
+
+        # --- layout ---
+        splitter = QSplitter(self)
+        splitter.addWidget(self.image_view)
+        splitter.addWidget(self.figure_view)
+        splitter.setSizes([700, 700])
+        self.setCentralWidget(splitter)
+
+        # --- menus ---
         file_menu = self.menuBar().addMenu("File")
         open_action = QAction("Open Image…", self)
         open_action.triggered.connect(self.open_image)
         file_menu.addAction(open_action)
 
-        tools_menu = self.menuBar().addMenu("Tools")
+        tools_menu = self.menuBar().addMenu("Tools (Image)")
         mark_action = QAction("Mark kDa Bands", self)
         mark_action.triggered.connect(self.enable_mark_mode)
         tools_menu.addAction(mark_action)
@@ -94,114 +111,106 @@ class MainWindow(QMainWindow):
         clear_marks_action.triggered.connect(self.clear_all_kda)
         tools_menu.addAction(clear_marks_action)
 
-        crop_action = QAction("Crop Region", self)
+        crop_action = QAction("Crop Region → Add to Figure", self)
         crop_action.triggered.connect(self.enable_crop_mode)
         tools_menu.addAction(crop_action)
-        
-        #show instructions before any image is loaded
+
+        fig_menu = self.menuBar().addMenu("Figure")
+        clear_fig_action = QAction("Clear Figure", self)
+        clear_fig_action.triggered.connect(self.clear_figure)
+        fig_menu.addAction(clear_fig_action)
+
+        # width controls
+        inc_action = QAction("Increase Width (10%)", self)
+        inc_action.setShortcut("]")
+        inc_action.triggered.connect(lambda: self.bump_selected_width(1.10))
+        fig_menu.addAction(inc_action)
+
+        dec_action = QAction("Decrease Width (10%)", self)
+        dec_action.setShortcut("[")
+        dec_action.triggered.connect(lambda: self.bump_selected_width(1/1.10))
+        fig_menu.addAction(dec_action)
+
+        setw_action = QAction("Set Width…", self)
+        setw_action.triggered.connect(self.set_selected_width_dialog)
+        fig_menu.addAction(setw_action)
+
         self.show_startup_message()
-        
+
+    # ---------- Startup message ----------
     def show_startup_message(self):
-        """Display initial instructions in the scene."""
-        self.scene.clear()
+        self.image_scene.clear()
         self.kda_markers.clear()
         self.pixmap_item = None
-
-        # give the empty scene a reasonable size to center the message
-        W, H = 1000, 700
-        self.scene.setSceneRect(0, 0, W, H)
-
+        W, H = 900, 650
+        self.image_scene.setSceneRect(0, 0, W, H)
         html = """
-    <div style="color:#444; font-family:Segoe UI, Arial, Helvetica;">
-      <h2 style="margin:0">Western Blot Figure Tool</h2>
-      <p style="margin:8px 0 0 0">
-        Please <b>pre-rotate</b> your gel so bands run <b>horizontally</b>.
-      </p>
-      <ul style="margin:6px 0 0 18px">
-        <li>File → <i>Open Image…</i></li>
-        <li>Tools → <i>Mark kDa Bands</i> (click ladder, enter values)</li>
-        <li>Tools → <i>Crop Region</i> (ticks are drawn outside on the left)</li>
-      </ul>
-    </div>
-    """
-
+        <div style="color:#444; font-family:Segoe UI, Arial, Helvetica;">
+          <h2 style="margin:0">Western Blot Figure Tool</h2>
+          <p style="margin:8px 0 0 0">Please <b>pre-rotate</b> your gel so bands run <b>horizontally</b>.</p>
+          <ul style="margin:6px 0 0 18px">
+            <li>File → <i>Open Image…</i></li>
+            <li>Tools → <i>Mark kDa Bands</i> (click ladder, enter values)</li>
+            <li>Tools → <i>Crop Region → Add to Figure</i></li>
+          </ul>
+        </div>
+        """
         msg = QGraphicsTextItem()
-        msg.setTextWidth(520)          # set width first so wrapping is correct
-        msg.setHtml(html)              # render as rich text (no literal <b>…</b>)
-
-        br = msg.boundingRect()        # now measure after textWidth/html set
+        msg.setTextWidth(520)
+        msg.setHtml(html)
+        br = msg.boundingRect()
         msg.setPos((W - br.width())/2, (H - br.height())/2)
-
-    # soft background panel
-        from PySide6.QtGui import QColor, QPen
-        from PySide6.QtWidgets import QGraphicsRectItem
         pad = 12
         bg = QGraphicsRectItem(0, 0, br.width()+2*pad, br.height()+2*pad)
         bg.setBrush(QColor(245, 245, 245))
         bg.setPen(QPen(Qt.lightGray))
         bg.setPos(msg.x()-pad, msg.y()-pad)
         bg.setZValue(-1)
+        self.image_scene.addItem(bg)
+        self.image_scene.addItem(msg)
 
-        self.scene.addItem(bg)
-        self.scene.addItem(msg)
-
-    # ------------ Image I/O ------------
+    # ---------- Image I/O ----------
     def open_image(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "Open Gel Image", "", "Image Files (*.png *.jpg *.jpeg *.tif *.tiff)"
         )
         if not path:
             return
-        pixmap = QPixmap(path)
-        if pixmap.isNull():
+        pm = QPixmap(path)
+        if pm.isNull():
+            QMessageBox.warning(self, "Load error", "Could not load that image.")
             return
-
-        self.current_pixmap = pixmap
-        self.scene.clear()
+        self.current_pixmap = pm
+        self.image_scene.clear()
         self.kda_markers.clear()
+        self.pixmap_item = self.image_scene.addPixmap(pm)
+        self.pixmap_item.setPos(self.image_left_margin, 0)
+        self.image_scene.setSceneRect(0, 0, pm.width()+self.image_left_margin+10, pm.height())
+        self.image_view.fitInView(self.image_scene.sceneRect(), Qt.KeepAspectRatio)
 
-        # place the pixmap shifted to the RIGHT by left_margin
-        self.pixmap_item = self.scene.addPixmap(pixmap)
-        self.pixmap_item.setPos(self.left_margin, 0)
-
-        # extend scene rect so margin area is visible
-        self.scene.setSceneRect(QRectF(0, 0, pixmap.width() + self.left_margin + 10, pixmap.height()))
-        self.view.fitInView(self.scene.sceneRect(), Qt.KeepAspectRatio)
-
-    # ------------ kDa marking ------------
+    # ---------- kDa marking ----------
     def enable_mark_mode(self):
         if self.current_pixmap is None:
             return
-        self.view.mode = "mark"
-        self.view.mark_callback = self.add_kda_marker
+        self.image_view.mode = "mark"
+        self.image_view.mark_callback = self.add_kda_marker
 
     def add_kda_marker(self, scene_y: float):
-        # Ask user for kDa value (positional args)
         val, ok = QInputDialog.getDouble(self, "kDa value", "Enter kDa:", 0.0, 0.0, 1_000_000.0, 1)
         if not ok or self.pixmap_item is None:
             return
-
-        # draw tick just LEFT of gel, inside the margin
-        x1 = self.left_margin - 2.0   # near gel edge
-        x0 = x1 - 20.0                # tick length 20 px to the left
-
+        x1 = self.image_left_margin - 2.0
+        x0 = x1 - 20.0
         pen = QPen(Qt.black)
         line_item = QGraphicsLineItem(x0, scene_y, x1, scene_y)
         line_item.setPen(pen)
-        self.scene.addItem(line_item)
-
-        # label to the left of the tick
+        self.image_scene.addItem(line_item)
         label = QGraphicsSimpleTextItem(f"{val:g}")
         label.setFont(QFont("", 10))
         label.setBrush(Qt.black)
-        
         br = label.boundingRect()
-        gap = 6.0  # space between label and tick
-        label_x = x0 - gap - br.width()         # x0 is the LEFT end of the tick
-        label_y = scene_y - br.height() / 2.0   # vertically center
-        label.setPos(label_x, label_y)
-        self.scene.addItem(label)
-
+        label.setPos(x0 - 6.0 - br.width(), scene_y - br.height()/2.0)
+        self.image_scene.addItem(label)
         self.kda_markers.append({"y": float(scene_y), "kda": float(val), "line": line_item, "text": label})
         self.kda_markers.sort(key=lambda d: d["y"])
 
@@ -209,76 +218,158 @@ class MainWindow(QMainWindow):
         if not self.kda_markers:
             return
         last = self.kda_markers.pop()
-        self.scene.removeItem(last["line"])
-        self.scene.removeItem(last["text"])
+        self.image_scene.removeItem(last["line"])
+        self.image_scene.removeItem(last["text"])
 
     def clear_all_kda(self):
         for d in self.kda_markers:
-            self.scene.removeItem(d["line"])
-            self.scene.removeItem(d["text"])
+            self.image_scene.removeItem(d["line"])
+            self.image_scene.removeItem(d["text"])
         self.kda_markers.clear()
 
-    # ------------ Cropping ------------
+    # ---------- Cropping ----------
     def enable_crop_mode(self):
         if self.current_pixmap is None:
             return
-        self.view.mode = "crop"
-        self.view.crop_callback = self.crop_region
+        self.image_view.mode = "crop"
+        self.image_view.crop_callback = self.crop_region
 
     def crop_region(self, scene_rect):
-        # convert scene rect to PIXMAP coordinates (because pixmap is shifted by left_margin)
-        offset = self.pixmap_item.pos().toPoint()  # (left_margin, 0)
+        offset = self.pixmap_item.pos().toPoint()
         pix_rect = scene_rect.translated(-offset)
         cropped = self.current_pixmap.copy(pix_rect)
-
-        # keep only markers whose y falls inside the crop's scene rect
+        if cropped.isNull():
+            return
         inside = [m for m in self.kda_markers if scene_rect.top() <= m["y"] <= scene_rect.bottom()]
+        protein, ok = QInputDialog.getText(self, "Protein name", "Enter protein name:")
+        if not ok:
+            return
+        self.add_band_to_figure(cropped, inside, scene_rect, protein.strip() or "Protein")
 
-        self.show_cropped_with_ticks(cropped, inside, scene_rect)
+    # ---------- Figure placement & width-based resizing ----------
+    def add_band_to_figure(self, pixmap: QPixmap, markers, src_scene_rect: QRectF, protein_name: str):
+        y0 = self.figure_next_y
 
-    def show_cropped_with_ticks(self, pixmap: QPixmap, markers, src_scene_rect):
-        # preview with its own left margin so ticks are outside the crop
-        left_margin = 60
+        # default width = last band's width (if any)
+        target_w = int(self.last_band_width) if self.last_band_width else pixmap.width()
+        scaled_pm = pixmap.scaledToWidth(target_w, Qt.SmoothTransformation)
+        scale = target_w / pixmap.width()   # uniform scale (height scales by same factor)
 
-        w = QWidget()
-        w.setWindowTitle("Cropped Region (with kDa)")
-        layout = QVBoxLayout(w)
-        preview_scene = QGraphicsScene(w)
-        preview_view = QGraphicsView(preview_scene)
-        layout.addWidget(preview_view)
+        pix_item = self.figure_scene.addPixmap(scaled_pm)
+        pix_item.setPos(self.figure_left_margin, y0)
+        pix_item.setFlag(pix_item.GraphicsItemFlag.ItemIsSelectable, True)
 
-        # place crop at (left_margin, 0)
-        pix_item = preview_scene.addPixmap(pixmap)
-        pix_item.setPos(left_margin, 0)
+        # marker Y's relative to crop top; scale them vertically by the same factor
+        y_locals = [m["y"] - src_scene_rect.top() for m in markers]
 
-        # extend scene
-        preview_scene.setSceneRect(QRectF(0, 0, pixmap.width() + left_margin + 10, pixmap.height()))
-
-        # draw ticks in the margin
         pen = QPen(Qt.black)
-        for m in markers:
-            y_local = m["y"] - src_scene_rect.top()
-            x1 = left_margin - 2.0
+        tick_items = []
+        for m, y_local in zip(markers, y_locals):
+            y = y0 + y_local * scale
+            x1 = self.figure_left_margin - 2.0
             x0 = x1 - 20.0
-            line = QGraphicsLineItem(x0, y_local, x1, y_local)
-            line.setPen(pen)
-            preview_scene.addItem(line)
+            line = self.figure_scene.addLine(x0, y, x1, y, pen)
+            lab = QGraphicsSimpleTextItem(f"{m['kda']:g}")
+            lab.setFont(QFont("", 10))
+            lab.setBrush(Qt.black)
+            br = lab.boundingRect()
+            lab.setPos(x0 - 6.0 - br.width(), y - br.height()/2.0)
+            self.figure_scene.addItem(lab)
+            tick_items.append((line, lab))
 
-            label = QGraphicsSimpleTextItem(f"{m['kda']:g}")
-            label.setFont(QFont("", 10))
-            label.setBrush(Qt.black)
-            br = label.boundingRect()
-            label.setPos(x0 - 6.0 - br.width(), y_local - br.height()/2.0)
-            preview_scene.addItem(label)
+        # protein name at right, vertically centered
+        name_item = QGraphicsSimpleTextItem(protein_name)
+        name_item.setFont(QFont("", 12))
+        name_item.setBrush(Qt.black)
+        nbr = name_item.boundingRect()
+        name_item.setPos(self.figure_left_margin + scaled_pm.width() + 10,
+                         y0 + scaled_pm.height()/2.0 - nbr.height()/2.0)
+        self.figure_scene.addItem(name_item)
 
-        w.resize(600, 450)
-        w.show()
-        self._crop_window = w
+        band = {
+            "pix_item": pix_item,
+            "orig_pixmap": pixmap,
+            "y0": y0,
+            "y_locals": y_locals,
+            "ticks": tick_items,
+            "name_item": name_item,
+            "width": target_w
+        }
+        self.figure_bands.append(band)
+        self.selected_band = band
+        self.last_band_width = target_w
+
+        required_w = self.figure_left_margin + scaled_pm.width() + 10 + nbr.width() + 40
+        if required_w > self.figure_scene.sceneRect().width():
+            r = self.figure_scene.sceneRect()
+            self.figure_scene.setSceneRect(0, 0, max(required_w, self.figure_min_width), r.height())
+
+        self.figure_next_y += scaled_pm.height() + 30
+        if self.figure_next_y + 200 > self.figure_scene.sceneRect().height():
+            r = self.figure_scene.sceneRect()
+            self.figure_scene.setSceneRect(0, 0, r.width(), r.height() + 800)
+
+        self.figure_view.ensureVisible(0, self.figure_next_y, 10, 10)
+
+    def on_selection_changed(self):
+        self.selected_band = None
+        for b in self.figure_bands:
+            if b["pix_item"].isSelected():
+                self.selected_band = b
+                break
+
+    def bump_selected_width(self, factor: float):
+        if not self.selected_band:
+            return
+        new_w = max(10, int(self.selected_band["width"] * factor))
+        self.resize_band_by_width(self.selected_band, new_w)
+
+    def set_selected_width_dialog(self):
+        if not self.selected_band:
+            return
+        cur = int(self.selected_band["width"])
+        val, ok = QInputDialog.getInt(self, "Set width", "Width (pixels):", cur, 10, 20000, 1)
+        if ok:
+            self.resize_band_by_width(self.selected_band, int(val))
+
+    def resize_band_by_width(self, band: dict, new_width: int):
+        """Resize the selected band by WIDTH; recompute tick Y's and relayout its name."""
+        scaled_pm = band["orig_pixmap"].scaledToWidth(new_width, Qt.SmoothTransformation)
+        band["pix_item"].setPixmap(scaled_pm)
+
+        scale = new_width / band["orig_pixmap"].width()
+        x1 = self.figure_left_margin - 2.0
+        x0 = x1 - 20.0
+        for (line, lab), y_local in zip(band["ticks"], band["y_locals"]):
+            y = band["y0"] + y_local * scale
+            line.setLine(x0, y, x1, y)
+            br = lab.boundingRect()
+            lab.setPos(x0 - 6.0 - br.width(), y - br.height()/2.0)
+
+        nbr = band["name_item"].boundingRect()
+        band["name_item"].setPos(self.figure_left_margin + scaled_pm.width() + 10,
+                                 band["y0"] + scaled_pm.height()/2.0 - nbr.height()/2.0)
+
+        band["width"] = new_width
+        self.last_band_width = new_width
+
+        required_w = self.figure_left_margin + scaled_pm.width() + 10 + nbr.width() + 40
+        if required_w > self.figure_scene.sceneRect().width():
+            r = self.figure_scene.sceneRect()
+            self.figure_scene.setSceneRect(0, 0, max(required_w, self.figure_min_width), r.height())
+
+    def clear_figure(self):
+        self.figure_scene.clear()
+        self.figure_bands.clear()
+        self.selected_band = None
+        self.figure_next_y = 20
+        self.last_band_width = None
+        self.figure_scene.setSceneRect(0, 0, self.figure_min_width, 1200)
 
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     win = MainWindow()
-    win.resize(1000, 750)
+    win.resize(1200, 750)
     win.show()
     sys.exit(app.exec())
