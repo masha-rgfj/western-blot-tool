@@ -1,3 +1,19 @@
+Metadata-Version: 2.4
+Name: wbtool
+Version: 0.0.1
+Summary: Annotation of western blot images
+Author-email: RGFJ <pirozhkova@mail.tau.ac.il>
+License-Expression: MIT
+Project-URL: Homepage, https://github.com/masha-rgfj/western-blot-tool
+Project-URL: Issues, https://github.com/masha-rgfj/western-blot-tool/issues
+Classifier: Programming Language :: Python :: 3
+Classifier: Operating System :: OS Independent
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: pyside6
+Dynamic: license-file
+
 Makes annotated (molecular weights, protein names) Western blot figures from pre-rotated gel images.
 
 
